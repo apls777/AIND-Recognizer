@@ -76,8 +76,33 @@ class SelectorBIC(ModelSelector):
         """
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on BIC scores
-        raise NotImplementedError
+        N, num_features = self.X.shape
+        logN = np.log(N)
+
+        best_score = best_model = None
+
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            # get model
+            model = self.base_model(num_components)
+            if model is None:
+                continue
+
+            # get model score
+            try:
+                logL = model.score(self.X, self.lengths)
+            except ValueError:
+                continue
+
+            # calculate BIC score
+            p = (num_components ** 2) + 2 * num_features * num_components - 1
+            score = -2 * logL + p * logN
+
+            # update the best score
+            if best_score is None or score < best_score:
+                best_score = score
+                best_model = model
+
+        return best_model
 
 
 class SelectorDIC(ModelSelector):
@@ -92,8 +117,36 @@ class SelectorDIC(ModelSelector):
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on DIC scores
-        raise NotImplementedError
+        best_score = best_model = None
+
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            # get model
+            model = self.base_model(num_components)
+            if model is None:
+                continue
+
+            try:
+                # get score for the current word
+                logL = model.score(self.X, self.lengths)
+
+                # sum scores of other words
+                words_logL = 0
+                for word in self.words:
+                    if word != self.this_word:
+                        X, lengths = self.hwords[word]
+                        words_logL += model.score(X, lengths)
+            except ValueError:
+                continue
+
+            # calculate DIC score
+            score = logL - (1 / (len(self.words) - 1)) * words_logL
+
+            # update the best score
+            if best_score is None or score > best_score:
+                best_score = score
+                best_model = model
+
+        return best_model
 
 
 class SelectorCV(ModelSelector):
@@ -104,5 +157,43 @@ class SelectorCV(ModelSelector):
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection using CV
-        raise NotImplementedError
+        best_score = None
+        best_num_components = 0
+
+        # split the training data
+        n_splits = min(3, len(self.sequences))
+        if n_splits > 1:
+            splits = list(KFold(n_splits).split(self.sequences))
+        else:
+            # use the same data for training and test
+            splits = [([0], [0])]
+
+        for num_components in range(self.min_n_components, self.max_n_components + 1):
+            scores = []
+            try:
+                for cv_train_idx, cv_test_idx in splits:
+                    # create a model using the training data
+                    train_Xlengths = combine_sequences(cv_train_idx, self.sequences)
+                    model = SelectorConstant({self.this_word: self.sequences}, {self.this_word: train_Xlengths},
+                                             self.this_word, n_constant=num_components).select()
+                    if model is None:
+                        raise ValueError
+
+                    # get the model score for the test data
+                    test_X, test_lengths = combine_sequences(cv_test_idx, self.sequences)
+                    logL = model.score(test_X, test_lengths)
+                    scores.append(logL)
+            except ValueError:
+                continue
+
+            score = sum(scores) / len(scores)
+
+            # update the best score
+            if best_score is None or score > best_score:
+                best_score = score
+                best_num_components = num_components
+
+        # create a model with the best number of hidden states
+        best_model = self.base_model(best_num_components)
+
+        return best_model
